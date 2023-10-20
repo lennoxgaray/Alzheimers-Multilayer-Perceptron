@@ -1,0 +1,350 @@
+---
+title: "goingbacktomridataneuralnet"
+author: "Aubree Krager"
+date: "4/27/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Libraries
+```{r}
+library(neuralnet)
+library(tidyverse)
+library(dplyr)
+library(caret)
+library(sigmoid)
+library(ggplot2)
+library(dplyr)
+library(MASS)
+library(dtplyr)
+library(nnet)
+library(devtools)
+```
+
+Get Data 
+```{r}
+set.seed(123)
+#this comes from teams -> MRI Cortical Thickness -> combined_mri_data.csv
+mri_health <- read_csv("combined_mri_data.csv")
+
+#this comes from team -> Health History Data -> health_demographic.csv
+health_demographic <- read.csv("health_demographic.csv")
+```
+
+```{r}
+mri_health <- subset(mri_health, select = c(NACCID, GRAYVOL, WHITEVOL, HIPPOVOL, NACCALZD, Total_Thick))
+```
+
+```{r}
+done <- left_join(mri_health, health_demographic, by = c("NACCID", "NACCALZD"))
+
+done <- done %>%
+  mutate(specific_ethnicity = case_when(HISPANIC == 1 ~ "Hispanic",
+                                        NACCNIHR == "White" & HISPANIC == 0 ~ "Non HispanicWhite",
+                                        NACCNIHR == "Black" & HISPANIC == 0 ~ "Non HispanicBlack"))
+
+done <- done %>% 
+  drop_na(BPDIAS) %>% 
+  drop_na(NACCBMI) %>% 
+  drop_na(HXHYPER) %>% 
+  drop_na(HXSTROKE) %>% 
+  drop_na(DIABETES) %>% 
+  drop_na(DEP2YRS) %>% 
+  drop_na(CVHATT) %>% 
+  drop_na(CVAFIB) %>% 
+  drop_na(BPSYS) %>% 
+  drop_na(B12DEF) %>% 
+  drop_na(HYPERTEN) %>% 
+  drop_na(HYPERCHO) %>% 
+  drop_na(HISPANIC) %>% 
+  drop_na(SMOKYRS) %>% 
+  drop_na(NACCAGE) %>% 
+  drop_na(PACKSPER) %>% 
+  drop_na(EDUC) %>% 
+  drop_na(RACE) %>% 
+  drop_na(SEX) %>% 
+  drop_na(ALCOHOL) %>% 
+  drop_na(TOBAC100) %>% 
+  drop_na(NACCNIHR) %>% 
+  drop_na(MARISTAT) %>% 
+  drop_na(CVCHF) %>% 
+  drop_na(specific_ethnicity)
+
+#write_csv(done, "sendtonick.csv")
+```
+
+Subset to what i need
+```{r}
+nndata <- subset(done, select = c(NACCALZD, NACCNIHR, HISPANIC, DEP2YRS, B12DEF, HYPERTEN, HXSTROKE, NACCAGE, NACCBMI,  SMOKYRS, NACCID, Total_Thick, GRAYVOL, WHITEVOL, HIPPOVOL, DIABETES, ALCOHOL, specific_ethnicity, EDUC, SEX))
+```
+
+Dummy Data
+```{r}
+nndata <- nndata %>% 
+  mutate(NACCNIHR = as.factor(NACCNIHR),
+         HISPANIC = as.factor(HISPANIC),
+         DEP2YRS = as.factor(DEP2YRS),
+         B12DEF = as.factor(B12DEF),
+         HYPERTEN = as.factor(HYPERTEN),
+         HXSTROKE = as.factor(HXSTROKE),
+        DIABETES = as.factor(DIABETES),
+        ALCOHOL = as.factor(ALCOHOL),
+        specific_ethnicity = as.factor(specific_ethnicity),
+        SEX = as.factor(SEX))
+
+dummy_data <- model.matrix(~ NACCNIHR + HISPANIC + DEP2YRS + B12DEF + HYPERTEN + HXSTROKE + NACCALZD + DIABETES + ALCOHOL + specific_ethnicity + SEX- 1, nndata)
+```
+
+Standardize
+```{r}
+my_cols <- c("NACCAGE","NACCBMI","SMOKYRS","Total_Thick", "GRAYVOL", "WHITEVOL", "HIPPOVOL", "EDUC")
+
+nndata_numeric <-
+  nndata[, my_cols]
+
+max.B <- as.numeric(apply(nndata_numeric, 2, max))
+min.B <- as.numeric(apply(nndata_numeric, 2, min))
+
+nndata_numeric.awesome <- as.data.frame(scale(nndata_numeric, center = min.B, scale = max.B - min.B))
+
+apply(nndata_numeric.awesome,2,range)
+```
+
+Create required data set
+```{r}
+nn_data <- cbind(nndata_numeric.awesome, dummy_data)
+```
+
+fix col names
+```{r}
+colnames(nn_data)[4] <- "TotalThick"
+colnames(nn_data)[9] <- "NACCNIHRAIAN"
+colnames(nn_data)[15] <-"B12DEFRecentorActive"
+colnames(nn_data)[16] <-"B12DEFRemoteorInactive"
+colnames(nn_data)[17] <-"HYPERCHORecentorActive"
+colnames(nn_data)[18] <-"HYPERCHORemoteorInactive"
+colnames(nn_data)[21] <-"DIABETESRecentorActive"
+colnames(nn_data)[22] <-"DIABETESRemoteorInactive"
+colnames(nn_data)[23] <-"ALCOHOLRecentorActive"
+colnames(nn_data)[24] <-"ALCOHOLRemoteorInactive"
+colnames(nn_data)[26] <-"specificethnicityNonHispanicBlack"
+colnames(nn_data)[27] <-"specificethnicityNonHispanicWhite"
+
+nn_data <- nn_data %>% 
+  mutate(NACCALZD = as.factor(NACCALZD))
+```
+
+Try this without the 0's
+```{r}
+#getting rid of 0's which means cognitive impairment not due to AD
+nn_data2 <- nn_data %>% 
+  filter(NACCALZD != 0)
+
+#redefine 1 to be AD and 0 to be No cognitive impairment 
+#note in the previous data set 8 is normal cognition and 1 is AD
+nn_data2 <- nn_data2 %>%
+  mutate(NACCALZD = recode(NACCALZD, "8" = "0"))
+```
+
+train and test
+```{r}
+random_rows2 <- sort(sample(nrow(nn_data2), nrow(nn_data2)*.3))
+train2 <- nn_data2[random_rows2,]
+test2 <- nn_data2[-random_rows2,]
+train.response = nn_data2$NACCALZD
+test.resposne = nn_data2$NACCALZD
+
+```
+
+try model 
+```{r}
+meetingnn2 <- nnet(NACCALZD ~ specificethnicityNonHispanicBlack + specificethnicityNonHispanicWhite + DEP2YRSYes + B12DEFRecentorActive + HYPERCHORecentorActive + HXSTROKEPresent + NACCAGE + NACCBMI + SMOKYRS + TotalThick + WHITEVOL + HIPPOVOL + DIABETESRecentorActive + SEXMale,data=train2 ,size = 4, decay = .0001, maxit = 500) 
+
+```
+
+How did we do? 
+```{r}
+test2$pred_nnet <- predict(meetingnn2, test2, type = "class")
+table(test2$pred_nnet, test2$NACCALZD)
+
+accuracy <- (697 + 199)/(697 + 199 + 63 + 156)
+accuracy
+
+pred.mtx = matrix(table(test2$pred_nnet, test2$NACCALZD), nrow=2)
+
+acc = tr(pred.mtx)/sum(pred.mtx)
+```
+80.35% percent accuracy. 
+
+#redefine 1 to be AD and 0 to be normal cognition 
+#note in the previous data set 8 is normal cognition and 1 is AD
+
+
+```{r}
+library(devtools)
+library(ggplot2)
+source_url('https://gist.githubusercontent.com/fawda123/7471137/raw/466c1474d0a505ff044412703516c34f1a4684a5/nnet_plot_update.r')
+
+
+
+plot <- plot(meetingnn2)
+
+plot_title <- "Structure of Neural Network Predicting Alzheimer's Disease"
+title(main = plot_title)
+```
+
+## Prediction with all three levels
+
+Split into training and test 
+```{r}
+random_rows <- sort(sample(nrow(nn_data), nrow(nn_data)*.3))
+train <- nn_data[random_rows,]
+test <- nn_data[-random_rows,]
+```
+
+Make neural net
+```{r}
+meetingnn <- nnet(NACCALZD ~ NACCNIHRAIAN + NACCNIHRBlack + NACCNIHRMultiracial + NACCNIHRWhite + HISPANIC1 + DEP2YRSYes + B12DEFRecentorActive + HYPERCHORecentorActive + HXSTROKEPresent + NACCAGE + NACCBMI + SMOKYRS + TotalThick + WHITEVOL + HIPPOVOL + DIABETESRecentorActive ,data=train ,size = 4, decay = .0001, maxit = 500) 
+
+#plot(meetingnn)
+```
+Summary
+```{r}
+summary(meetingnn)
+```
+How did we do? 
+```{r}
+test$pred_nnet <- predict(meetingnn, test, type = "class")
+
+mtab <- table(test$pred_nnet, test$NACCALZD)
+confusionMatrix(mtab)
+```
+
+
+### Lennox's Neural Net Attempt. 
+
+My model is going to assume some things about the data, which at this point in time I do not know are true. Firstly, I'm going to solve the classification problem under the assumption that the data is not linearly-separable. That is, I am going to implement a Multilayer Perceptron model. This is a neural network with multiple layers that acts on non-linearly separable data. 
+Some simple methods for determining if data is linearly separable: 
+
+Support vector machine, Linear Programming, and Clustering. 
+
+ok i'll stop being lazy and run the SVM myself. 
+
+```{r}
+library(e1071)
+
+train.class = svm(NACCALZD ~., data=train2)
+summary(train.class)
+```
+
+Great! We get that our data is radial (not linearly seperable); This model wont be a complete waste of time then! :) 
+
+
+At any rate, I will be using the data as prepared above. Im going to assume the labels have been one-hot coded. 
+
+```{r}
+library(keras) 
+library(tensorflow)
+library(caret)
+```
+
+Not sure how to scale inputs here due to unfamiliarity with data. Going to ignore that for now, but its worth mentioning for further investigation. 
+
+```{r}
+## Pasting this is to keep track of object names: 
+
+random_rows2 <- sort(sample(nrow(nn_data2), nrow(nn_data2)*.3))
+train2 <- nn_data2[random_rows2,]
+test2 <- nn_data2[-random_rows2,]
+train.response = train2$NACCALZD
+test.response = test2$NACCALZD
+train.response = as.matrix(train.response)
+train.response = array(train.response[,1])
+train.response[train.response == '0'] <- 0
+train.response[train.response == '1'] <- 1
+train.response = as.numeric(train.response)
+train2 = as.matrix(train2)
+train2 = matrix(as.numeric(train2), ncol=28)
+
+test2 = as.matrix(test2)
+test2 = matrix(as.numeric(test2), ncol=28)
+train2 = train2[,-20] ## eliminate response variable from data 
+test2 = test2[,-20]
+
+
+test.response = as.matrix(test.response)
+test.response = array(test.response[,1])
+test.response[test.response == '0'] <- 0
+test.response[test.response == '1'] <- 1
+test.response = as.numeric(test.response)
+
+```
+
+29 units in the input layer from 28 columns in the data + 1 bias node. 
+
+Some notes for learning: 
+## Input and interm activations: 
+
+Using relu cuz why not. 
+
+## Input Shape: 
+usually the features of the input image for a CNN; otherwise it is the number of columns in the data. 
+
+## Final Activation 
+
+Sigmoid for binary classification; Softmax for multiclass classification. 
+This provides a matrix of probabilities associated with each class. 
+
+## compile loss 
+
+binary_crossentropy for our problem for obvious reasons. More on that below. 
+
+The choice between binary_crossentropy and categorical_crossentropy depends on the nature of your classification problem. If you're dealing with a binary classification problem, binary_crossentropy is the way to go. However, if your problem involves more than two classes, you should use categorical_crossentropy. 
+## compile optimizer 
+
+This is actually quite complex and nuanced depending on the problem. For simple neural networks such as this one, its best to use stochastic gradient descent. For more complex networks for deep learning, its better to use adam optimizer. Even still, there are more optimizers and the choice isn't so simple as written here. 
+
+
+```{r}
+model = keras_model_sequential()
+model %>% 
+  layer_dense(units = 27, activation = 'relu', input_shape = ncol(train2)) %>%
+  layer_dropout(rate = 0.4) %>% 
+  layer_dense(units = 10, activation = 'relu') %>% 
+  layer_dropout(rate = 0.2) %>% 
+  layer_dense(units=2) %>% 
+  layer_dropout(rate =0.1) %>% 
+  layer_dense(units = 1, activation = 'sigmoid')  
+
+
+model %>% compile(loss = "binary_crossentropy", 
+                  optimizer = optimizer_adam(),
+                  metrics = c('accuracy')
+                  )
+
+history = model %>% 
+  fit(train2, train.response, epochs = 200,
+      batch_size = 16, validation_split = 0.2) 
+
+plot(history)
+
+model %>% evaluate(test2, test.response)
+
+probs = predict(model, test2, type='class')  
+
+confusionMatrix(probs, as.factor(test.response))
+
+
+```
+
+Is this model too good to be true? 
+
+
+```{r}
+
+
+```
+
